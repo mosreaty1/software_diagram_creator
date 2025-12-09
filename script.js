@@ -74,232 +74,518 @@ async function generateDiagram() {
 
 // Convert plain text requirements to Mermaid syntax
 function convertToMermaid(requirements, diagramType) {
-    const lines = requirements.toLowerCase().split(/[,.\n]+/).map(line => line.trim()).filter(line => line);
+    // Split by line breaks, commas, periods, or semicolons
+    const lines = requirements.split(/[\n;]/).map(line => line.trim()).filter(line => line);
 
     switch(diagramType) {
         case 'flowchart':
-            return generateFlowchart(lines);
+            return generateFlowchart(requirements, lines);
         case 'sequence':
-            return generateSequenceDiagram(lines);
+            return generateSequenceDiagram(requirements, lines);
         case 'class':
-            return generateClassDiagram(lines);
+            return generateClassDiagram(requirements, lines);
         case 'er':
-            return generateERDiagram(lines);
+            return generateERDiagram(requirements, lines);
         case 'state':
-            return generateStateDiagram(lines);
+            return generateStateDiagram(requirements, lines);
         case 'gantt':
-            return generateGanttChart(lines);
+            return generateGanttChart(requirements, lines);
         default:
-            return generateFlowchart(lines);
+            return generateFlowchart(requirements, lines);
     }
 }
 
-function generateFlowchart(lines) {
+function generateFlowchart(text, lines) {
     let mermaid = 'graph TD\n';
-    let nodeId = 0;
     const nodes = [];
+    const connections = [];
+    let nodeCounter = 0;
 
-    // Parse requirements
-    lines.forEach(line => {
-        if (line.includes('start')) {
-            nodes.push(`    A${nodeId}([Start])`);
-            nodeId++;
-        } else if (line.includes('end')) {
-            nodes.push(`    Z([End])`);
-        } else if (line.includes('if') || line.includes('check') || line.includes('valid')) {
-            const label = line.substring(0, 40);
-            nodes.push(`    D${nodeId}{${label}?}`);
-            nodeId++;
-        } else if (line.includes('error') || line.includes('fail')) {
-            const label = line.substring(0, 40);
-            nodes.push(`    E${nodeId}[${label}]`);
-            nodeId++;
-        } else if (line) {
-            const label = line.substring(0, 40);
-            nodes.push(`    B${nodeId}[${label}]`);
-            nodeId++;
+    // Clean and parse lines
+    const steps = lines.map(line => {
+        // Remove common bullet points and numbering
+        return line.replace(/^[-•*\d+.)\]]\s*/, '').trim();
+    }).filter(line => line.length > 0);
+
+    // If no steps, create from sentences
+    if (steps.length === 0) {
+        steps.push(...text.split(/[.!?]/).map(s => s.trim()).filter(s => s.length > 3));
+    }
+
+    let hasStart = false;
+    let hasEnd = false;
+    const nodeMap = new Map();
+
+    steps.forEach((step, index) => {
+        const lowerStep = step.toLowerCase();
+        let nodeId = `N${nodeCounter++}`;
+        let nodeType = 'rect'; // default rectangle
+        let label = step;
+
+        // Detect node types based on keywords
+        if (lowerStep.match(/\b(start|begin|initial)\b/) && !hasStart) {
+            nodeId = 'Start';
+            nodeType = 'stadium';
+            label = 'Start';
+            hasStart = true;
+        } else if (lowerStep.match(/\b(end|finish|complete|done|exit)\b/)) {
+            nodeId = 'End';
+            nodeType = 'stadium';
+            label = 'End';
+            hasEnd = true;
+        } else if (lowerStep.match(/\b(if|check|verify|validate|is|are|does|can|should|whether)\b/) || lowerStep.includes('?')) {
+            nodeType = 'diamond';
+            label = step.replace(/[?]/g, '');
+        } else if (lowerStep.match(/\b(error|fail|exception|invalid)\b/)) {
+            nodeType = 'rect';
+            label = step;
         }
+
+        // Truncate long labels
+        if (label.length > 50) {
+            label = label.substring(0, 47) + '...';
+        }
+
+        nodeMap.set(index, { id: nodeId, type: nodeType, label: label });
     });
 
-    // Add nodes
-    mermaid += nodes.join('\n') + '\n';
+    // Generate node definitions
+    nodeMap.forEach((node, index) => {
+        let nodeDef = '';
+        switch (node.type) {
+            case 'stadium':
+                nodeDef = `    ${node.id}([${node.label}])`;
+                break;
+            case 'diamond':
+                nodeDef = `    ${node.id}{${node.label}}`;
+                break;
+            default:
+                nodeDef = `    ${node.id}[${node.label}]`;
+        }
+        nodes.push(nodeDef);
+    });
 
-    // Add connections
-    for (let i = 0; i < nodes.length - 1; i++) {
-        const currentNode = nodes[i].trim().split(/[\[\(\{]/)[0].trim();
-        const nextNode = nodes[i + 1].trim().split(/[\[\(\{]/)[0].trim();
+    // Generate connections
+    const nodeArray = Array.from(nodeMap.values());
+    for (let i = 0; i < nodeArray.length - 1; i++) {
+        const current = nodeArray[i];
+        const next = nodeArray[i + 1];
 
-        if (currentNode.startsWith('D')) {
-            mermaid += `    ${currentNode} -->|Yes| ${nextNode}\n`;
-            if (i + 2 < nodes.length) {
-                const afterNext = nodes[i + 2].trim().split(/[\[\(\{]/)[0].trim();
-                mermaid += `    ${currentNode} -->|No| ${afterNext}\n`;
+        if (current.type === 'diamond') {
+            // Decision node - create Yes/No branches
+            connections.push(`    ${current.id} -->|Yes| ${next.id}`);
+
+            // Try to find an alternative path (error/no path)
+            if (i + 2 < nodeArray.length) {
+                const alt = nodeArray[i + 2];
+                connections.push(`    ${current.id} -->|No| ${alt.id}`);
+                connections.push(`    ${next.id} --> ${alt.id}`);
+                i++; // Skip the next node since we already connected it
             }
         } else {
-            mermaid += `    ${currentNode} --> ${nextNode}\n`;
+            connections.push(`    ${current.id} --> ${next.id}`);
         }
     }
 
+    mermaid += nodes.join('\n') + '\n' + connections.join('\n');
     return mermaid;
 }
 
-function generateSequenceDiagram(lines) {
+function generateSequenceDiagram(text, lines) {
     let mermaid = 'sequenceDiagram\n';
 
-    // Extract participants
+    // Extract participants and interactions
     const participants = new Set();
+    const interactions = [];
+    const actionWords = ['send', 'sends', 'receive', 'receives', 'call', 'calls', 'return', 'returns',
+                         'request', 'requests', 'respond', 'responds', 'query', 'queries', 'validate',
+                         'validates', 'authenticate', 'authenticates', 'notify', 'notifies', 'to', 'from'];
+
     lines.forEach(line => {
-        const words = line.split(/\s+/);
+        const cleaned = line.replace(/^[-•*\d+.)\]]\s*/, '').trim();
+        if (!cleaned) return;
+
+        const lowerLine = cleaned.toLowerCase();
+        const words = cleaned.split(/\s+/);
+
+        // Extract participants (capitalize words that aren't action words)
         words.forEach(word => {
-            if (word.length > 3 && !['sends', 'receives', 'calls', 'returns', 'requests', 'responds'].includes(word)) {
-                participants.add(word);
+            const cleanWord = word.replace(/[^a-zA-Z0-9]/g, '');
+            if (cleanWord.length > 2 && !actionWords.includes(cleanWord.toLowerCase())) {
+                // Capitalize first letter
+                const participant = cleanWord.charAt(0).toUpperCase() + cleanWord.slice(1);
+                if (participants.size < 6) { // Limit to 6 participants
+                    participants.add(participant);
+                }
             }
         });
+
+        // Parse interaction patterns
+        let from = null, to = null, message = cleaned;
+
+        // Pattern: "A sends/calls/requests to B"
+        const pattern1 = cleaned.match(/^(\w+)\s+(sends?|calls?|requests?|validates?|queries?|notifies?)\s+(?:to\s+)?(\w+)/i);
+        if (pattern1) {
+            from = pattern1[1].charAt(0).toUpperCase() + pattern1[1].slice(1);
+            to = pattern1[3].charAt(0).toUpperCase() + pattern1[3].slice(1);
+            message = pattern1[2];
+        }
+
+        // Pattern: "A to B: message" or "A -> B"
+        const pattern2 = cleaned.match(/^(\w+)\s+(?:to|->)\s+(\w+)[\s:]*(.*)$/i);
+        if (!from && pattern2) {
+            from = pattern2[1].charAt(0).toUpperCase() + pattern2[1].slice(1);
+            to = pattern2[2].charAt(0).toUpperCase() + pattern2[2].slice(1);
+            message = pattern2[3] || 'message';
+        }
+
+        interactions.push({ from, to, message: message.substring(0, 40) });
     });
 
     // Add participants
-    Array.from(participants).slice(0, 5).forEach(p => {
-        mermaid += `    participant ${p.charAt(0).toUpperCase() + p.slice(1)}\n`;
+    const participantArray = Array.from(participants);
+    participantArray.forEach(p => {
+        mermaid += `    participant ${p}\n`;
     });
 
     // Add interactions
-    lines.forEach(line => {
-        const parts = Array.from(participants);
-        if (parts.length >= 2) {
-            const from = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
-            const to = parts[1].charAt(0).toUpperCase() + parts[1].slice(1);
-            const message = line.substring(0, 30);
-            mermaid += `    ${from}->>${to}: ${message}\n`;
+    interactions.forEach((interaction, index) => {
+        let from = interaction.from || participantArray[index % participantArray.length];
+        let to = interaction.to || participantArray[(index + 1) % participantArray.length];
+
+        if (from && to && from !== to) {
+            mermaid += `    ${from}->>${to}: ${interaction.message}\n`;
         }
     });
 
-    return mermaid;
-}
-
-function generateClassDiagram(lines) {
-    let mermaid = 'classDiagram\n';
-    const classes = [];
-
-    lines.forEach(line => {
-        const words = line.split(/\s+/);
-        words.forEach(word => {
-            if (word.length > 3 && word.charAt(0).toUpperCase() === word.charAt(0)) {
-                if (!classes.includes(word)) {
-                    classes.push(word);
-                }
-            }
-        });
-    });
-
-    // Add classes with attributes
-    classes.forEach(className => {
-        mermaid += `    class ${className} {\n`;
-
-        lines.forEach(line => {
-            if (line.includes(className.toLowerCase())) {
-                if (line.includes('has') || line.includes('with')) {
-                    const attributes = line.split(/has|with/)[1];
-                    if (attributes) {
-                        const attrs = attributes.split(/and|,/).map(a => a.trim());
-                        attrs.forEach(attr => {
-                            if (attr) {
-                                mermaid += `        +${attr.substring(0, 20)}\n`;
-                            }
-                        });
-                    }
-                }
-            }
-        });
-
-        mermaid += `        +getId()\n`;
-        mermaid += `    }\n`;
-    });
-
-    // Add relationships
-    if (classes.length >= 2) {
-        for (let i = 0; i < classes.length - 1; i++) {
-            mermaid += `    ${classes[i]} --> ${classes[i + 1]}\n`;
+    // If no meaningful interactions, create a simple flow
+    if (interactions.length === 0 && participantArray.length >= 2) {
+        for (let i = 0; i < participantArray.length - 1; i++) {
+            mermaid += `    ${participantArray[i]}->>${participantArray[i + 1]}: Request\n`;
+            mermaid += `    ${participantArray[i + 1]}-->>${participantArray[i]}: Response\n`;
         }
     }
 
     return mermaid;
 }
 
-function generateERDiagram(lines) {
-    let mermaid = 'erDiagram\n';
-    const entities = [];
+function generateClassDiagram(text, lines) {
+    let mermaid = 'classDiagram\n';
+    const classMap = new Map();
+    const relationships = [];
 
-    // Extract entities
     lines.forEach(line => {
-        const words = line.split(/\s+/);
+        const cleaned = line.replace(/^[-•*\d+.)\]]\s*/, '').trim();
+        if (!cleaned) return;
+
+        const lowerLine = cleaned.toLowerCase();
+
+        // Extract class names (look for capitalized words or after "class" keyword)
+        const classPattern = /\b([A-Z][a-zA-Z0-9]*)\b/g;
+        const classKeywordPattern = /(\w+)\s+class/i;
+
+        let match;
+        while ((match = classPattern.exec(cleaned)) !== null) {
+            const className = match[1];
+            if (!classMap.has(className)) {
+                classMap.set(className, { attributes: [], methods: [] });
+            }
+        }
+
+        // Also check for explicit class declarations
+        const keywordMatch = cleaned.match(classKeywordPattern);
+        if (keywordMatch) {
+            const className = keywordMatch[1].charAt(0).toUpperCase() + keywordMatch[1].slice(1);
+            if (!classMap.has(className)) {
+                classMap.set(className, { attributes: [], methods: [] });
+            }
+        }
+
+        // Extract attributes (look for "has", "with", "contains")
+        if (lowerLine.match(/\b(has|with|contains|includes)\b/)) {
+            const parts = cleaned.split(/\b(has|with|contains|includes)\b/i);
+            if (parts.length >= 3) {
+                const classNamePart = parts[0].trim();
+                const attributesPart = parts[2].trim();
+
+                // Find class name
+                const classMatch = classNamePart.match(/\b([A-Z][a-zA-Z0-9]*)\b/);
+                if (classMatch) {
+                    const className = classMatch[1];
+                    if (!classMap.has(className)) {
+                        classMap.set(className, { attributes: [], methods: [] });
+                    }
+
+                    // Extract attributes
+                    const attrs = attributesPart.split(/\b(and|,)\b/).map(a => a.trim()).filter(a => a && a !== 'and' && a !== ',');
+                    attrs.forEach(attr => {
+                        const cleanAttr = attr.replace(/[^a-zA-Z0-9\s]/g, '').trim();
+                        if (cleanAttr && cleanAttr.length > 0) {
+                            classMap.get(className).attributes.push(cleanAttr);
+                        }
+                    });
+                }
+            }
+        }
+
+        // Extract relationships
+        if (lowerLine.match(/\b(inherits|extends|implements)\b/)) {
+            const match = cleaned.match(/(\w+)\s+(inherits|extends|implements)\s+(\w+)/i);
+            if (match) {
+                relationships.push({ from: match[1], to: match[3], type: 'inheritance' });
+            }
+        }
+
+        if (lowerLine.match(/\b(has|contains|uses|owns)\b.*\b(one|many|multiple)\b/)) {
+            const classes = Array.from(cleaned.matchAll(/\b([A-Z][a-zA-Z0-9]*)\b/g)).map(m => m[1]);
+            if (classes.length >= 2) {
+                relationships.push({ from: classes[0], to: classes[1], type: 'association' });
+            }
+        }
+    });
+
+    // If no classes found, extract common nouns
+    if (classMap.size === 0) {
+        const words = text.split(/\s+/);
+        const commonClasses = ['User', 'Product', 'Order', 'Customer', 'Item', 'Service', 'Account', 'Payment'];
         words.forEach(word => {
-            if (word.length > 3 && !entities.includes(word.toUpperCase())) {
-                entities.push(word.toUpperCase());
+            const cleaned = word.replace(/[^a-zA-Z]/g, '');
+            const capitalized = cleaned.charAt(0).toUpperCase() + cleaned.slice(1).toLowerCase();
+            if (cleaned.length > 3 && (cleaned[0] === cleaned[0].toUpperCase() || commonClasses.includes(capitalized))) {
+                if (!classMap.has(capitalized) && classMap.size < 5) {
+                    classMap.set(capitalized, { attributes: ['id', 'name', 'createdAt'], methods: [] });
+                }
+            }
+        });
+    }
+
+    // Generate class definitions
+    classMap.forEach((classData, className) => {
+        mermaid += `    class ${className} {\n`;
+
+        // Add attributes
+        if (classData.attributes.length > 0) {
+            classData.attributes.forEach(attr => {
+                mermaid += `        +${attr}\n`;
+            });
+        } else {
+            mermaid += `        +id\n`;
+            mermaid += `        +name\n`;
+        }
+
+        // Add a method
+        mermaid += `        +get${className}()\n`;
+        mermaid += `    }\n`;
+    });
+
+    // Generate relationships
+    if (relationships.length > 0) {
+        relationships.forEach(rel => {
+            if (classMap.has(rel.from) && classMap.has(rel.to)) {
+                const arrow = rel.type === 'inheritance' ? ' <|-- ' : ' --> ';
+                mermaid += `    ${rel.to}${arrow}${rel.from}\n`;
+            }
+        });
+    } else {
+        // Create default relationships
+        const classArray = Array.from(classMap.keys());
+        for (let i = 0; i < classArray.length - 1; i++) {
+            mermaid += `    ${classArray[i]} --> ${classArray[i + 1]}\n`;
+        }
+    }
+
+    return mermaid;
+}
+
+function generateERDiagram(text, lines) {
+    let mermaid = 'erDiagram\n';
+    const entities = new Map();
+    const relationships = [];
+
+    const stopWords = ['the', 'and', 'has', 'have', 'with', 'for', 'entity', 'table', 'database'];
+
+    lines.forEach(line => {
+        const cleaned = line.replace(/^[-•*\d+.)\]]\s*/, '').trim();
+        if (!cleaned) return;
+
+        const lowerLine = cleaned.toLowerCase();
+
+        // Extract entity names (capitalized words or after "entity"/"table" keywords)
+        const words = cleaned.split(/\s+/);
+        words.forEach(word => {
+            const cleanWord = word.replace(/[^a-zA-Z]/g, '');
+            if (cleanWord.length > 2 && !stopWords.includes(cleanWord.toLowerCase())) {
+                const entityName = cleanWord.toUpperCase();
+                if (!entities.has(entityName) && entities.size < 6) {
+                    entities.set(entityName, []);
+                }
+            }
+        });
+
+        // Extract relationships
+        const relPatterns = [
+            { regex: /(\w+)\s+(?:has|have|contains?)\s+(?:one|many|multiple)?\s*(\w+)/i, card: '||--o{' },
+            { regex: /(\w+)\s+(?:belongs?\s+to)\s+(\w+)/i, card: '}o--||' },
+            { regex: /(\w+)\s+(?:references?|links?\s+to)\s+(\w+)/i, card: '}o--||' }
+        ];
+
+        relPatterns.forEach(pattern => {
+            const match = cleaned.match(pattern.regex);
+            if (match) {
+                const from = match[1].toUpperCase();
+                const to = match[2].toUpperCase();
+                if (from !== to) {
+                    relationships.push({ from, to, cardinality: pattern.card, label: 'has' });
+                }
             }
         });
     });
 
-    // Add entities with attributes
-    entities.slice(0, 5).forEach(entity => {
-        mermaid += `    ${entity} {\n`;
+    // Generate entity definitions
+    entities.forEach((attrs, entityName) => {
+        mermaid += `    ${entityName} {\n`;
         mermaid += `        int id PK\n`;
         mermaid += `        string name\n`;
         mermaid += `        datetime created_at\n`;
+        mermaid += `        datetime updated_at\n`;
         mermaid += `    }\n`;
     });
 
-    // Add relationships
-    if (entities.length >= 2) {
-        mermaid += `    ${entities[0]} ||--o{ ${entities[1]} : contains\n`;
-        if (entities.length >= 3) {
-            mermaid += `    ${entities[1]} }o--|| ${entities[2]} : references\n`;
+    // Generate relationships
+    if (relationships.length > 0) {
+        relationships.forEach(rel => {
+            if (entities.has(rel.from) && entities.has(rel.to)) {
+                mermaid += `    ${rel.from} ${rel.cardinality} ${rel.to} : "${rel.label}"\n`;
+            }
+        });
+    } else {
+        // Create default relationships
+        const entityArray = Array.from(entities.keys());
+        for (let i = 0; i < entityArray.length - 1; i++) {
+            const card = i % 2 === 0 ? '||--o{' : '}o--||';
+            mermaid += `    ${entityArray[i]} ${card} ${entityArray[i + 1]} : "relates to"\n`;
         }
     }
 
     return mermaid;
 }
 
-function generateStateDiagram(lines) {
+function generateStateDiagram(text, lines) {
     let mermaid = 'stateDiagram-v2\n';
-    mermaid += '    [*] --> Start\n';
 
     const states = [];
+    const transitions = [];
+
     lines.forEach(line => {
-        if (line && !line.includes('start') && !line.includes('end')) {
-            const state = line.substring(0, 30).replace(/[^a-zA-Z0-9\s]/g, '');
-            if (state.trim()) {
-                states.push(state.trim());
+        const cleaned = line.replace(/^[-•*\d+.)\]]\s*/, '').trim();
+        if (!cleaned) return;
+
+        const lowerLine = cleaned.toLowerCase();
+
+        // Skip lines that just say "start" or "end"
+        if (lowerLine === 'start' || lowerLine === 'begin') {
+            return;
+        }
+
+        if (lowerLine === 'end' || lowerLine === 'finish') {
+            return;
+        }
+
+        // Extract state names
+        let stateName = cleaned.replace(/[^a-zA-Z0-9\s]/g, '').trim();
+
+        // Look for transition keywords
+        if (lowerLine.match(/\b(to|then|next|goes\s+to|transitions?\s+to|moves?\s+to|becomes?)\b/)) {
+            const parts = cleaned.split(/\b(to|then|next|goes\s+to|transitions?\s+to|moves?\s+to|becomes?)\b/i);
+            if (parts.length >= 3) {
+                const from = parts[0].replace(/[^a-zA-Z0-9\s]/g, '').trim();
+                const to = parts[2].replace(/[^a-zA-Z0-9\s]/g, '').trim();
+                if (from && to) {
+                    if (!states.includes(from)) states.push(from);
+                    if (!states.includes(to)) states.push(to);
+                    transitions.push({ from, to });
+                    return;
+                }
             }
+        }
+
+        // Otherwise, treat as a state
+        if (stateName && stateName.length > 0 && !states.includes(stateName)) {
+            states.push(stateName);
         }
     });
 
-    // Add state transitions
-    for (let i = 0; i < states.length; i++) {
-        if (i === 0) {
-            mermaid += `    Start --> ${states[i]}\n`;
-        }
-        if (i < states.length - 1) {
+    // Start state
+    mermaid += '    [*] --> ' + (states.length > 0 ? states[0] : 'Start') + '\n';
+
+    // Add explicit transitions or create sequential flow
+    if (transitions.length > 0) {
+        transitions.forEach(t => {
+            mermaid += `    ${t.from} --> ${t.to}\n`;
+        });
+    } else {
+        for (let i = 0; i < states.length - 1; i++) {
             mermaid += `    ${states[i]} --> ${states[i + 1]}\n`;
-        } else {
-            mermaid += `    ${states[i]} --> [*]\n`;
         }
+    }
+
+    // End state
+    if (states.length > 0) {
+        mermaid += `    ${states[states.length - 1]} --> [*]\n`;
     }
 
     return mermaid;
 }
 
-function generateGanttChart(lines) {
+function generateGanttChart(text, lines) {
     let mermaid = 'gantt\n';
     mermaid += '    title Project Timeline\n';
     mermaid += '    dateFormat YYYY-MM-DD\n';
-    mermaid += '    section Planning\n';
+
+    const sections = new Map();
+    let currentSection = 'Tasks';
 
     lines.forEach((line, index) => {
-        if (line) {
-            const taskName = line.substring(0, 30);
-            const duration = `${index + 1}d`;
-            mermaid += `    ${taskName} :${duration}\n`;
+        const cleaned = line.replace(/^[-•*\d+.)\]]\s*/, '').trim();
+        if (!cleaned) return;
+
+        const lowerLine = cleaned.toLowerCase();
+
+        // Check for section keywords
+        if (lowerLine.match(/\b(phase|section|stage|sprint|milestone)\b/)) {
+            currentSection = cleaned.replace(/\b(phase|section|stage|sprint|milestone)\b:?\s*/i, '').trim();
+            if (!sections.has(currentSection)) {
+                sections.set(currentSection, []);
+            }
+        } else {
+            // Add as a task
+            if (!sections.has(currentSection)) {
+                sections.set(currentSection, []);
+            }
+            sections.get(currentSection).push(cleaned);
         }
+    });
+
+    // If no sections found, create a default section
+    if (sections.size === 0) {
+        sections.set('Project Tasks', lines.map(l => l.replace(/^[-•*\d+.)\]]\s*/, '').trim()).filter(l => l));
+    }
+
+    // Generate Gantt chart
+    let taskCounter = 0;
+    sections.forEach((tasks, sectionName) => {
+        mermaid += `    section ${sectionName}\n`;
+
+        tasks.forEach((task, index) => {
+            if (task) {
+                const taskName = task.substring(0, 40);
+                const duration = Math.max(3, Math.ceil(task.length / 10)); // Estimate duration based on task complexity
+                const startDay = taskCounter * duration;
+
+                mermaid += `    ${taskName} :${duration}d\n`;
+                taskCounter++;
+            }
+        });
     });
 
     return mermaid;
